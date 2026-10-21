@@ -37,6 +37,18 @@ class QATConfig(BaseConfig):
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
     activation_observer: str = "static_minmax"
     quantization_config_path: Optional[str] = None
+    quant_backend: str = "npu"
+    rounding_mode: str = "rint"
+    fake_quant_targets: list[str] = field(default_factory=lambda: ["Fprop"])
+    backward_reduction_axis_fake_quant: bool = False
+    rotation_enable: bool = False
+    rotation_targets: list[str] = field(default_factory=lambda: ["Fprop"])
+    rotation_block_size: int = 32
+    rotation_seed: int = 0
+    probe_quant_error: bool = False
+    probe_quant_error_output_path: Optional[str] = None
+    fallback_layers: Any = None
+    experts: dict[str, Any] = field(default_factory=dict)
 
 
 def load_quantization_config(qat_config: QATConfig) -> dict[str, Any]:
@@ -89,14 +101,49 @@ def apply_qat(
     config: QATConfig | dict[str, Any],
 ) -> nn.Module:
     """Apply QAT to a model by replacing nn.Linear with QATLinear."""
-    from verl.utils.qat.linear import QATLinear, QATMode
-
     if not isinstance(config, QATConfig):
         config = QATConfig(**config)
 
     if not config.enable:
         logger.info("QAT is disabled, returning original model")
         return model
+
+    from verl.utils.qat.mxfp_quant import normalize_mxfp_mode
+
+    try:
+        mxfp_mode = normalize_mxfp_mode(config.mode)
+    except ValueError:
+        mxfp_mode = None
+
+    if mxfp_mode is not None:
+        from verl.utils.qat.mxfp_linear import MXFPQATConfig, MXFPQATLinear
+
+        mxfp_config = MXFPQATConfig(
+            mode=mxfp_mode.value,
+            group_size=config.group_size,
+            quant_backend=config.quant_backend,
+            rounding_mode=config.rounding_mode,
+            fake_quant_targets=config.fake_quant_targets,
+            backward_reduction_axis_fake_quant=config.backward_reduction_axis_fake_quant,
+            rotation_enable=config.rotation_enable,
+            rotation_targets=config.rotation_targets,
+            rotation_block_size=config.rotation_block_size,
+            rotation_seed=config.rotation_seed,
+        )
+        modules_to_replace = [
+            (name, module)
+            for name, module in model.named_modules()
+            if name
+            and isinstance(module, nn.Linear)
+            and not isinstance(module, MXFPQATLinear)
+            and not _matches_ignore_patterns(name, config.ignore_patterns)
+        ]
+        for name, module in modules_to_replace:
+            _set_module(model, name, MXFPQATLinear.from_linear(module, mxfp_config))
+        logger.info("Applied %s MXFP QAT to %d dense Linear layers", mxfp_mode.value, len(modules_to_replace))
+        return model
+
+    from verl.utils.qat.linear import QATLinear, QATMode
 
     mode = QATMode(config.mode.lower())
     logger.info(f"Applying QAT with mode={mode.value}, group_size={config.group_size}")
@@ -126,6 +173,18 @@ def apply_qat(
     logger.info(f"Successfully applied QAT to {converted_count} layers")
 
     return model
+
+
+def _matches_ignore_patterns(name: str, patterns: list[str]) -> bool:
+    for pattern in patterns:
+        if pattern.startswith("re:"):
+            if re.match(pattern[3:], name):
+                logger.debug("Ignoring %s due to regex pattern %s", name, pattern[3:])
+                return True
+        elif pattern in name:
+            logger.debug("Ignoring %s due to pattern %s", name, pattern)
+            return True
+    return False
 
 
 def _set_module(model: nn.Module, name: str, new_module: nn.Module):

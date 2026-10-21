@@ -500,9 +500,27 @@ class FSDPEngine(BaseEngine):
                 "group_size": self._qat_config.group_size,
                 "ignore_patterns": list(self._qat_config.ignore_patterns),
                 "activation_observer": self._qat_config.activation_observer,
+                "quant_backend": self._qat_config.quant_backend,
+                "rounding_mode": self._qat_config.rounding_mode,
+                "fake_quant_targets": list(self._qat_config.fake_quant_targets),
+                "backward_reduction_axis_fake_quant": self._qat_config.backward_reduction_axis_fake_quant,
+                "rotation_enable": self._qat_config.rotation_enable,
+                "rotation_targets": list(self._qat_config.rotation_targets),
+                "rotation_block_size": self._qat_config.rotation_block_size,
+                "rotation_seed": self._qat_config.rotation_seed,
+                "probe_quant_error": self._qat_config.probe_quant_error,
+                "probe_quant_error_output_path": self._qat_config.probe_quant_error_output_path,
+                "fallback_layers": self._qat_config.fallback_layers,
+                "experts": {
+                    "enable": self._qat_config.experts.enable,
+                    "npu_backend": self._qat_config.experts.npu_backend,
+                },
             },
         )
-        enable_qat_fuse(module)
+        from verl.utils.qat.mxfp_linear import is_mxfp_mode
+
+        if not is_mxfp_mode(self._qat_config.mode):
+            enable_qat_fuse(module)
 
         if self._qat_config.mode == "w4a4":
             self._restore_w4a4_input_scales(module, self.model_config.local_path)

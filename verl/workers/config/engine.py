@@ -35,6 +35,7 @@ __all__ = [
     "EngineConfig",
     "EngineRouterReplayConfig",
     "QATEngineConfig",
+    "QATExpertsConfig",
     "MindSpeedEngineConfig",
 ]
 
@@ -126,13 +127,21 @@ class EngineConfig(BaseConfig):
 
 
 @dataclass
+class QATExpertsConfig(BaseConfig):
+    """MoE expert compute options for MXFP QAT."""
+
+    enable: bool = False
+    npu_backend: str = "grouped_matmul"
+
+
+@dataclass
 class QATEngineConfig(BaseConfig):
     """Configuration for QAT (Quantization-Aware Training) within an engine.
 
     Args:
         enable (bool): Whether to enable QAT, default False
-        mode (str): Quantization mode, "w4a16" or "w4a4", default "w4a16"
-        group_size (int): Group size for blockwise quantization, default 16
+        mode (str): NVFP4 or MXFP QAT mode
+        group_size (int): Group size for blockwise quantization
         ignore_patterns (list[str]): Module name patterns to exclude from quantization
         activation_observer (str): Observer strategy for activation global_scale (W4A4 only)
         quantization_config_path (Optional[str]): Path to quantization config JSON for vLLM
@@ -144,6 +153,18 @@ class QATEngineConfig(BaseConfig):
     ignore_patterns: list[str] = field(default_factory=lambda: ["lm_head", "embed_tokens", "re:.*mlp.gate$"])
     activation_observer: str = "static_minmax"
     quantization_config_path: Optional[str] = None
+    quant_backend: str = "npu"
+    rounding_mode: str = "rint"
+    fake_quant_targets: list[str] = field(default_factory=lambda: ["Fprop"])
+    backward_reduction_axis_fake_quant: bool = False
+    rotation_enable: bool = False
+    rotation_targets: list[str] = field(default_factory=lambda: ["Fprop"])
+    rotation_block_size: int = 32
+    rotation_seed: int = 0
+    probe_quant_error: bool = False
+    probe_quant_error_output_path: Optional[str] = None
+    fallback_layers: Any = None
+    experts: QATExpertsConfig = field(default_factory=QATExpertsConfig)
 
 
 @dataclass

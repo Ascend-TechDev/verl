@@ -37,6 +37,17 @@ from verl.utils.qat.core import (
     invalidate_all_scales,
     load_quantization_config,
 )
+from verl.utils.qat.mxfp_linear import MXFPQATConfig, MXFPQATLinear
+from verl.utils.qat.mxfp_quant import (
+    MXFPMode,
+    dequantize_mxfp4,
+    dequantize_mxfp8,
+    fake_quantize,
+    normalize_mxfp_mode,
+    quantize_mxfp4,
+    quantize_mxfp8,
+)
+from verl.utils.qat.mxfp_rotation import RotationConfig, rotate_blocks
 from verl.utils.qat.vllm_patch import (
     apply_qat_patches,
     manual_process_weights_after_loading,
@@ -54,4 +65,15 @@ __all__ = [
     "apply_qat_patches",
     "manual_process_weights_after_loading",
     "prepare_qat_for_load_weights",
+    "MXFPMode",
+    "MXFPQATConfig",
+    "MXFPQATLinear",
+    "quantize_mxfp8",
+    "dequantize_mxfp8",
+    "quantize_mxfp4",
+    "dequantize_mxfp4",
+    "fake_quantize",
+    "normalize_mxfp_mode",
+    "RotationConfig",
+    "rotate_blocks",
 ]

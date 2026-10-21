@@ -11,6 +11,7 @@ from verl.utils.qat.mxfp_quant import (
     quantize_mxfp8,
 )
 from verl.utils.qat.mxfp_rotation import RotationConfig, _matrix, rotate_blocks
+from verl.utils.qat.mxfp_linear import MXFPQATConfig, MXFPQATLinear
 
 
 @pytest.mark.parametrize("mode", ["mxfp_w8a8", "w8a8_mxfp8", "mxfp_w4a8", "mxfp_w4a4"])
@@ -50,3 +51,50 @@ def test_rotation_is_seeded_and_orthogonal():
     assert torch.allclose(matrix_a @ matrix_a.T, torch.eye(8), atol=1e-6)
     x = torch.randn((3, 19))
     assert rotate_blocks(x, config).shape == x.shape
+
+
+def test_linear_replacement_reuses_parameters_and_has_identity_without_transforms():
+    linear = torch.nn.Linear(32, 64)
+    config = MXFPQATConfig(
+        mode="mxfp_w8a8", quant_backend="torch", fake_quant_targets=(), rotation_enable=False
+    )
+    qat = MXFPQATLinear.from_linear(linear, config)
+    assert qat.weight is linear.weight
+    assert qat.bias is linear.bias
+    x = torch.randn((3, 32))
+    assert torch.equal(qat(x), linear(x))
+
+
+@pytest.mark.parametrize("targets", [("fprop",), ("dgrad",), ("wgrad",), ("fprop", "dgrad", "wgrad")])
+@pytest.mark.parametrize("save_backward_axes", [False, True])
+def test_linear_backward_targets_keep_gradient_shapes(targets, save_backward_axes):
+    linear = torch.nn.Linear(32, 64)
+    config = MXFPQATConfig(
+        mode="mxfp_w8a8",
+        quant_backend="torch",
+        fake_quant_targets=targets,
+        backward_reduction_axis_fake_quant=save_backward_axes,
+    )
+    qat = MXFPQATLinear.from_linear(linear, config)
+    x = torch.randn((4, 32), requires_grad=True)
+    qat(x).square().mean().backward()
+    assert x.grad is not None and x.grad.shape == x.shape and torch.isfinite(x.grad).all()
+    assert qat.weight.grad is not None and qat.weight.grad.shape == qat.weight.shape
+    assert torch.isfinite(qat.weight.grad).all()
+
+
+def test_linear_fprop_rotation_returns_gradients_in_original_coordinates():
+    linear = torch.nn.Linear(32, 64)
+    config = MXFPQATConfig(
+        mode="mxfp_w8a8",
+        quant_backend="torch",
+        fake_quant_targets=(),
+        rotation_enable=True,
+        rotation_targets=("fprop",),
+        rotation_seed=23,
+    )
+    qat = MXFPQATLinear.from_linear(linear, config)
+    x = torch.randn((4, 32), requires_grad=True)
+    qat(x).sum().backward()
+    assert x.grad.shape == x.shape
+    assert qat.weight.grad.shape == linear.weight.shape
