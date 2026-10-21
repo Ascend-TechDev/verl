@@ -30,6 +30,10 @@ class MXFPMode(str, Enum):
     W4A8 = "mxfp_w4a8"
     W4A4 = "mxfp_w4a4"
 
+    @staticmethod
+    def values() -> tuple[str, ...]:
+        return tuple(item.value for item in MXFPMode)
+
 
 _MODE_ALIASES = {
     "mxfp_w8a8": MXFPMode.W8A8,
@@ -47,7 +51,7 @@ def normalize_mxfp_mode(mode: str | MXFPMode) -> MXFPMode:
     try:
         return _MODE_ALIASES[str(mode).lower()]
     except KeyError as exc:
-        raise ValueError(f"Unsupported MXFP QAT mode {mode!r}; expected one of {tuple(item.value for item in MXFPMode)}") from exc
+        raise ValueError(f"Unsupported MXFP QAT mode {mode!r}; expected one of {MXFPMode.values()}") from exc
 
 
 def normalize_quant_backend(backend: str) -> str:

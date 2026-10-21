@@ -35,6 +35,11 @@ def normalize_targets(targets: Any) -> tuple[str, ...]:
     return tuple(target for target in ROTATION_TARGETS if target in normalized)
 
 
+def _check_block_size(block_size: int) -> None:
+    if block_size <= 0 or block_size & (block_size - 1):
+        raise ValueError(f"MXFP rotation block_size must be a positive power of two, got {block_size}")
+
+
 @dataclass(frozen=True)
 class RotationConfig:
     enable: bool = False
@@ -45,8 +50,7 @@ class RotationConfig:
     def __post_init__(self):
         object.__setattr__(self, "targets", normalize_targets(self.targets))
         if self.enable:
-            if self.block_size <= 0 or self.block_size & (self.block_size - 1):
-                raise ValueError("MXFP rotation block_size must be a positive power of two")
+            _check_block_size(self.block_size)
             if not self.targets:
                 raise ValueError("MXFP rotation requires at least one target")
 
