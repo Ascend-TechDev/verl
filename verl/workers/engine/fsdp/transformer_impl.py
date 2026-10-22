@@ -19,6 +19,7 @@ import gc
 import logging
 import os
 import warnings
+from collections.abc import Mapping
 from contextlib import nullcontext
 from typing import Callable, ContextManager, Optional
 
@@ -492,6 +493,14 @@ class FSDPEngine(BaseEngine):
         """Apply QAT transformations to the model before FSDP wrapping."""
         from verl.utils.qat.core import apply_qat, enable_qat_fuse
 
+        experts_config = getattr(self._qat_config, "experts", {})
+        if isinstance(experts_config, Mapping):
+            experts_enable = experts_config.get("enable", False)
+            experts_npu_backend = experts_config.get("npu_backend", "grouped_matmul")
+        else:
+            experts_enable = getattr(experts_config, "enable", False)
+            experts_npu_backend = getattr(experts_config, "npu_backend", "grouped_matmul")
+
         module = apply_qat(
             module,
             {
@@ -512,8 +521,8 @@ class FSDPEngine(BaseEngine):
                 "probe_quant_error_output_path": self._qat_config.probe_quant_error_output_path,
                 "fallback_layers": self._qat_config.fallback_layers,
                 "experts": {
-                    "enable": self._qat_config.experts.enable,
-                    "npu_backend": self._qat_config.experts.npu_backend,
+                    "enable": experts_enable,
+                    "npu_backend": experts_npu_backend,
                 },
             },
         )
