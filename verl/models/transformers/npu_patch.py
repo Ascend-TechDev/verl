@@ -31,6 +31,13 @@ from transformers.models.qwen3_vl import modeling_qwen3_vl
 from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
 from transformers.utils import logging
 
+from verl.utils.qat.mxfp_moe import (
+    get_mxfp_expert_qat_config,
+    mxfp_grouped_matmul,
+    prepare_mxfp_fprop_operands,
+    prepare_mxfp_weight_fprop,
+)
+
 logger = logging.get_logger(__name__)
 
 
@@ -193,10 +200,47 @@ def _qwen3_sparse_moe_routed_forward_npu(self, hidden_states: torch.Tensor):
         num_experts = self.gate.weight.shape[0]
     tokens_per_expert = torch.histc(selected_experts, bins=num_experts, min=0, max=num_experts)
 
-    up_res = NPUGmmFunction.apply(permuted_tokens, w1, tokens_per_expert)
-    gate_res = NPUGmmFunction.apply(permuted_tokens, w2, tokens_per_expert)
+    mxfp_qat_config = get_mxfp_expert_qat_config(self)
+    if mxfp_qat_config is not None:
+        permuted_tokens_fprop, w1_fprop = prepare_mxfp_fprop_operands(
+            permuted_tokens, w1, mxfp_qat_config
+        )
+        w2_fprop = prepare_mxfp_weight_fprop(w2, mxfp_qat_config)
+        up_res = mxfp_grouped_matmul(
+            permuted_tokens,
+            w1,
+            tokens_per_expert,
+            mxfp_qat_config,
+            name="gate_up.up_proj",
+            fprop_x=permuted_tokens_fprop,
+            fprop_weight=w1_fprop,
+        )
+        gate_res = mxfp_grouped_matmul(
+            permuted_tokens,
+            w2,
+            tokens_per_expert,
+            mxfp_qat_config,
+            name="gate_up.gate_proj",
+            fprop_x=permuted_tokens_fprop,
+            fprop_weight=w2_fprop,
+        )
+    else:
+        up_res = NPUGmmFunction.apply(permuted_tokens, w1, tokens_per_expert)
+        gate_res = NPUGmmFunction.apply(permuted_tokens, w2, tokens_per_expert)
     act_res = torch_npu.npu_swiglu(torch.cat([gate_res, up_res], dim=-1))
-    down_res = NPUGmmFunction.apply(act_res, w3, tokens_per_expert)
+    if mxfp_qat_config is not None:
+        act_res_fprop, w3_fprop = prepare_mxfp_fprop_operands(act_res, w3, mxfp_qat_config)
+        down_res = mxfp_grouped_matmul(
+            act_res,
+            w3,
+            tokens_per_expert,
+            mxfp_qat_config,
+            name="down_proj",
+            fprop_x=act_res_fprop,
+            fprop_weight=w3_fprop,
+        )
+    else:
+        down_res = NPUGmmFunction.apply(act_res, w3, tokens_per_expert)
 
     routed_hidden_states = torch_npu.npu_moe_token_unpermute(down_res, row_ids_map, probs=routing_weights)
 

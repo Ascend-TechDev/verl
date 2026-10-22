@@ -117,6 +117,7 @@ def apply_qat(
 
     if mxfp_mode is not None:
         from verl.utils.qat.mxfp_linear import MXFPQATConfig, MXFPQATLinear
+        from verl.utils.qat.mxfp_moe import attach_mxfp_expert_qat
 
         mxfp_config = MXFPQATConfig(
             mode=mxfp_mode.value,
@@ -130,6 +131,12 @@ def apply_qat(
             rotation_block_size=config.rotation_block_size,
             rotation_seed=config.rotation_seed,
         )
+        experts_config = config.experts
+        if isinstance(experts_config, dict):
+            experts_enabled = bool(experts_config.get("enable", False))
+        else:
+            experts_enabled = bool(getattr(experts_config, "enable", False))
+        moe_count = attach_mxfp_expert_qat(model, mxfp_config) if experts_enabled else 0
         modules_to_replace = [
             (name, module)
             for name, module in model.named_modules()
@@ -140,7 +147,13 @@ def apply_qat(
         ]
         for name, module in modules_to_replace:
             _set_module(model, name, MXFPQATLinear.from_linear(module, mxfp_config))
-        logger.info("Applied %s MXFP QAT to %d dense Linear layers", mxfp_mode.value, len(modules_to_replace))
+        logger.info(
+            "Applied %s QAT: dense_linear=%d, packed_moe_blocks=%d, experts_enabled=%s",
+            mxfp_mode.value,
+            len(modules_to_replace),
+            moe_count,
+            experts_enabled,
+        )
         return model
 
     from verl.utils.qat.linear import QATLinear, QATMode

@@ -38,6 +38,7 @@ from verl.utils.qat.core import (
     load_quantization_config,
 )
 from verl.utils.qat.mxfp_linear import MXFPQATConfig, MXFPQATLinear
+from verl.utils.qat.mxfp_moe import attach_mxfp_expert_qat, mxfp_grouped_matmul
 from verl.utils.qat.mxfp_quant import (
     MXFPMode,
     dequantize_mxfp4,
@@ -68,6 +69,8 @@ __all__ = [
     "MXFPMode",
     "MXFPQATConfig",
     "MXFPQATLinear",
+    "mxfp_grouped_matmul",
+    "attach_mxfp_expert_qat",
     "quantize_mxfp8",
     "dequantize_mxfp8",
     "quantize_mxfp4",
