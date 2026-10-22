@@ -23,6 +23,7 @@ from typing import Any, Optional
 import torch.nn as nn
 
 from verl.base_config import BaseConfig
+from verl.utils.qat.mxfp_debug import warn_once
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,34 @@ def apply_qat(
             len(modules_to_replace),
             moe_count,
             experts_enabled,
+        )
+        if experts_enabled and moe_count == 0:
+            warn_once(
+                ("moe-missing", mxfp_mode.value),
+                "MXFP expert QAT is enabled but no packed MoE blocks were found; expert path is inactive",
+            )
+        warn_once(
+            (
+                "apply",
+                mxfp_mode.value,
+                config.quant_backend,
+                tuple(config.fake_quant_targets),
+                tuple(config.rotation_targets),
+                config.rotation_enable,
+                experts_enabled,
+            ),
+            "FSDP2 MXFP QAT configured: mode=%s dense_linear=%d moe_blocks=%d experts=%s "
+            "fprop=%s dgrad=%s wgrad=%s rotation=%s rotation_targets=%s backward_axis_cache=%s",
+            mxfp_mode.value,
+            len(modules_to_replace),
+            moe_count,
+            experts_enabled,
+            "fprop" in mxfp_config.fake_quant_targets,
+            "dgrad" in mxfp_config.fake_quant_targets,
+            "wgrad" in mxfp_config.fake_quant_targets,
+            mxfp_config.rotation.enable,
+            mxfp_config.rotation.targets,
+            mxfp_config.backward_reduction_axis_fake_quant,
         )
         return model
 

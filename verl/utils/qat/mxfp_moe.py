@@ -13,6 +13,7 @@ from __future__ import annotations
 import torch
 
 from verl.utils.qat.mxfp_linear import MXFPQATConfig
+from verl.utils.qat.mxfp_debug import warn_once
 from verl.utils.qat.mxfp_quant import fake_quantize
 from verl.utils.qat.mxfp_rotation import rotate_blocks
 
@@ -108,6 +109,36 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
             else _transform_weight(weight, config, "fprop", config.weight_format, reduction_dim=1)
         )
         ctx.save_fprop = (x_fprop.detach(), weight_fprop.detach())
+        if config.backward_reduction_axis_fake_quant:
+            with torch.no_grad():
+                dgrad_weight = (
+                    _transform_weight(weight, config, "dgrad", config.weight_format, reduction_dim=2).detach()
+                    if _enabled(config, "dgrad")
+                    else None
+                )
+                wgrad_input = (
+                    _transform_tokens(x, config, "wgrad", config.activation_format).detach()
+                    if _enabled(config, "wgrad")
+                    else None
+                )
+        else:
+            dgrad_weight = None
+            wgrad_input = None
+        ctx.save_backward_operands = (dgrad_weight, wgrad_input)
+        warn_once(
+            (
+                "moe-fprop",
+                name,
+                config.mode,
+                config.quant_backend,
+                config.fake_quant_targets,
+                config.rotation.targets,
+            ),
+            "moe %s fprop executed: fake_quant=%s rotation=%s reduction_axis=feature",
+            name,
+            "fprop" in config.fake_quant_targets,
+            config.rotation.enable and "fprop" in config.rotation.targets,
+        )
         return _call_grouped_matmul(x_fprop, weight_fprop, group_list, ctx.group_list_type)
 
     @staticmethod
@@ -119,13 +150,31 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
         group_list = ctx.group_list
         group_list_type = ctx.group_list_type
         x_fprop, weight_fprop = ctx.save_fprop
+        dgrad_weight_saved, wgrad_input_saved = ctx.save_backward_operands
 
         if _enabled(config, "dgrad"):
+            warn_once(
+                (
+                    "moe-dgrad",
+                    ctx.name,
+                    config.mode,
+                    config.quant_backend,
+                    config.fake_quant_targets,
+                    config.rotation.targets,
+                ),
+                "moe %s dgrad executed: fake_quant=%s rotation=%s reduction_axis=output cached=%s",
+                ctx.name,
+                "dgrad" in config.fake_quant_targets,
+                config.rotation.enable and "dgrad" in config.rotation.targets,
+                dgrad_weight_saved is not None,
+            )
             grad_output_dgrad = _transform_feature(
                 grad_output, config, "dgrad", config.activation_format
             ).contiguous()
-            weight_dgrad = _transform_weight(
-                weight, config, "dgrad", config.weight_format, reduction_dim=2
+            weight_dgrad = (
+                dgrad_weight_saved
+                if dgrad_weight_saved is not None
+                else _transform_weight(weight, config, "dgrad", config.weight_format, reduction_dim=2)
             )
         else:
             grad_output_dgrad = grad_output
@@ -143,7 +192,26 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
         dx = _inverse_input_rotation(dx, config, feature_dim=-1)
 
         if _enabled(config, "wgrad"):
-            x_wgrad = _transform_tokens(x, config, "wgrad", config.activation_format)
+            warn_once(
+                (
+                    "moe-wgrad",
+                    ctx.name,
+                    config.mode,
+                    config.quant_backend,
+                    config.fake_quant_targets,
+                    config.rotation.targets,
+                ),
+                "moe %s wgrad executed: fake_quant=%s rotation=%s reduction_axis=token cached=%s",
+                ctx.name,
+                "wgrad" in config.fake_quant_targets,
+                config.rotation.enable and "wgrad" in config.rotation.targets,
+                wgrad_input_saved is not None,
+            )
+            x_wgrad = (
+                wgrad_input_saved
+                if wgrad_input_saved is not None
+                else _transform_tokens(x, config, "wgrad", config.activation_format)
+            )
             grad_output_wgrad = _transform_tokens(grad_output, config, "wgrad", config.activation_format)
         else:
             x_wgrad = x_fprop

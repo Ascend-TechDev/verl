@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 from verl.utils.qat.mxfp_quant import MXFPMode, fake_quantize, normalize_mxfp_mode
 from verl.utils.qat.mxfp_rotation import RotationConfig, rotate_blocks
+from verl.utils.qat.mxfp_debug import warn_once
 
 _TARGETS = ("fprop", "wgrad", "dgrad")
 _MXFP_MODE_KEYS = {
@@ -147,6 +148,20 @@ class _MXFPLinear(torch.autograd.Function):
         grad_input = None
         if need_input_grad:
             if ctx.dgrad_enabled:
+                warn_once(
+                    (
+                        "dense-dgrad",
+                        config.mode,
+                        config.quant_backend,
+                        config.fake_quant_targets,
+                        config.rotation.targets,
+                    ),
+                    "dense dgrad executed: fake_quant=%s rotation=%s reduction_axis=output cached=%s",
+                    "dgrad" in config.fake_quant_targets,
+                    config.rotation.enable and "dgrad" in config.rotation.targets,
+                    ctx.has_saved_dgrad_weight,
+                )
+            if ctx.dgrad_enabled:
                 grad_output_t = _target_tensor(grad_output_2d, config, "dgrad", config.activation_format)
                 weight_dgrad = (
                     saved_dgrad_weight if ctx.has_saved_dgrad_weight else _prepare_dgrad_weight(weight, config)
@@ -163,6 +178,20 @@ class _MXFPLinear(torch.autograd.Function):
         grad_weight = None
         if need_weight_grad:
             if ctx.wgrad_enabled:
+                warn_once(
+                    (
+                        "dense-wgrad",
+                        config.mode,
+                        config.quant_backend,
+                        config.fake_quant_targets,
+                        config.rotation.targets,
+                    ),
+                    "dense wgrad executed: fake_quant=%s rotation=%s reduction_axis=token cached=%s",
+                    "wgrad" in config.fake_quant_targets,
+                    config.rotation.enable and "wgrad" in config.rotation.targets,
+                    ctx.has_saved_wgrad_input,
+                )
+            if ctx.wgrad_enabled:
                 input_t = (
                     saved_wgrad_input_t if ctx.has_saved_wgrad_input else _prepare_wgrad_input(input, config)
                 )
@@ -177,7 +206,7 @@ class _MXFPLinear(torch.autograd.Function):
                 grad_weight = rotate_blocks(grad_weight, config.rotation, transpose=True)
 
         grad_bias = grad_output_2d.sum(dim=0) if not ctx.bias_is_none and ctx.needs_input_grad[2] else None
-        return grad_input, grad_weight, grad_bias, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None
 
 
 class MXFPQATLinear(nn.Linear):
@@ -206,6 +235,20 @@ class MXFPQATLinear(nn.Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         config = self.qat_config
+        warn_once(
+            (
+                "dense-fprop",
+                config.mode,
+                config.quant_backend,
+                config.fake_quant_targets,
+                config.rotation.targets,
+            ),
+            "dense fprop executed: mode=%s fake_quant=%s rotation=%s layer=%s",
+            config.mode,
+            "fprop" in config.fake_quant_targets,
+            config.rotation.enable and "fprop" in config.rotation.targets,
+            config.layer_name or "<first-dense>",
+        )
         if not self.fake_quant_enabled:
             return F.linear(input, self.weight, self.bias)
 

@@ -12,6 +12,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from verl.utils.qat.mxfp_debug import warn_once
+
 ROTATION_TARGETS = ("fprop", "wgrad", "dgrad")
 _TARGET_ALIASES = {
     "fprop": "fprop",
@@ -82,6 +84,15 @@ def rotate_blocks(tensor: torch.Tensor, config: RotationConfig, *, transpose: bo
         tensor = F.pad(tensor, (0, padding))
     work_dtype = torch.float32 if tensor.dtype in (torch.float16, torch.bfloat16) else tensor.dtype
     matrix = _matrix(block_size, config.seed, tensor.device, work_dtype)
+    warn_once(
+        ("rotation", block_size, config.seed, str(tensor.device), work_dtype),
+        "MXFP block rotation executed: block_size=%s seed=%s device=%s dtype=%s transpose=%s",
+        block_size,
+        config.seed,
+        tensor.device,
+        work_dtype,
+        transpose,
+    )
     if transpose:
         matrix = matrix.transpose(-1, -2)
     blocks = tensor.to(work_dtype).reshape(*tensor.shape[:-1], -1, block_size)

@@ -14,6 +14,8 @@ from enum import Enum
 
 import torch
 
+from verl.utils.qat.mxfp_debug import warn_once
+
 MXFP_GROUP_SIZE = 32
 MXFP8_EMAX = 8
 MXFP8_SCALE_EMAX = 127
@@ -221,6 +223,13 @@ def fake_quantize(
     rounding_mode: str = "rint",
 ) -> torch.Tensor:
     """Return the QDQ value; callers provide the STE boundary."""
+    warn_once(
+        ("qdq", fmt, quant_backend, rounding_mode),
+        "MXFP QDQ executed: format=%s backend=%s rounding=%s",
+        fmt,
+        quant_backend,
+        rounding_mode,
+    )
     original_shape = tensor.shape
     padded = (-tensor.shape[-1]) % MXFP_GROUP_SIZE
     if padded:
