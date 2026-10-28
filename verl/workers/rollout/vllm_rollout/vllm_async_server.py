@@ -21,6 +21,7 @@ import time
 import uuid
 import zlib
 from collections.abc import Mapping
+from itertools import groupby
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -800,6 +801,12 @@ class vLLMHttpServer:
                 and image_data is not None
             ):
                 image_token_id = self.model_config.hf_config.image_token_id
+                rollout_image_runs, actor_image_runs = (
+                    [sum(1 for _ in run) for token_id, run in groupby(prompt_token_ids) if token_id == image_token_id]
+                    for prompt_token_ids in (rollout_prompt_ids, actor_prompt_ids)
+                )
+                if rollout_image_runs != actor_image_runs:
+                    raise ValueError("Rollout routing replay requires identical actor and rollout prompt tokens")
                 rollout_prompt_ids, actor_prompt_ids = (
                     [
                         token_id
