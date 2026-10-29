@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import torch
 
-from verl.utils.qat.mxfp_linear import MXFPQATConfig
 from verl.utils.qat.mxfp_debug import warn_once
+from verl.utils.qat.mxfp_linear import MXFPQATConfig
 from verl.utils.qat.mxfp_quant import fake_quantize
 from verl.utils.qat.mxfp_rotation import rotate_blocks
 
@@ -54,6 +54,39 @@ def _transform_tokens(tensor: torch.Tensor, config: MXFPQATConfig, target: str, 
     return _transform_feature(tensor.transpose(0, 1), config, target, fmt).transpose(0, 1).contiguous()
 
 
+def _pad_expert_rows(
+    input: torch.Tensor,
+    grad_output: torch.Tensor,
+    group_list: torch.Tensor,
+    group_list_type: int,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pad each expert's token segment independently so transforms never mix experts."""
+    if group_list_type == 0:
+        cumulative_counts = group_list.to(torch.int64)
+        counts = cumulative_counts - torch.nn.functional.pad(cumulative_counts[:-1], (1, 0))
+    elif group_list_type == 1:
+        counts = group_list.to(torch.int64)
+    else:
+        raise ValueError(f"Unsupported grouped matmul group_list_type={group_list_type}")
+
+    padded_counts = torch.div(counts + block_size - 1, block_size, rounding_mode="floor") * block_size
+    positions = torch.arange(input.shape[0], device=input.device)
+    expert_ids = torch.searchsorted(counts.cumsum(0), positions, right=True)
+    padding = padded_counts - counts
+    padding_before = padding.cumsum(0) - padding
+    destinations = positions + padding_before.index_select(0, expert_ids)
+    capacity = ((input.shape[0] + (block_size - 1) * counts.numel() + block_size - 1) // block_size) * block_size
+    padded_input = input.new_zeros((capacity, input.shape[1])).index_copy(0, destinations, input)
+    padded_grad_output = grad_output.new_zeros((capacity, grad_output.shape[1])).index_copy(
+        0, destinations, grad_output
+    )
+    padded_counts[-1] += capacity - padded_counts.sum()
+    if group_list_type == 0:
+        padded_counts = padded_counts.cumsum(0)
+    return padded_input, padded_grad_output, padded_counts.to(group_list.dtype)
+
+
 def _inverse_input_rotation(tensor: torch.Tensor, config: MXFPQATConfig, feature_dim: int) -> torch.Tensor:
     if not (config.rotation.enable and "fprop" in config.rotation.targets):
         return tensor
@@ -62,22 +95,21 @@ def _inverse_input_rotation(tensor: torch.Tensor, config: MXFPQATConfig, feature
     return moved.movedim(-1, feature_dim).contiguous()
 
 
-def prepare_mxfp_fprop_operands(
-    x: torch.Tensor, weight: torch.Tensor, config: MXFPQATConfig
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Prepare detached fprop operands so gate/up can share activation QDQ."""
+def prepare_mxfp_fprop_input(x: torch.Tensor, config: MXFPQATConfig) -> torch.Tensor:
+    """Prepare a detached activation so gate/up can share fprop QDQ."""
     with torch.no_grad():
-        x_fprop = _transform_feature(x, config, "fprop", config.activation_format).detach()
-        weight_fprop = _transform_weight(weight, config, "fprop", config.weight_format, reduction_dim=1).detach()
-    return x_fprop, weight_fprop
+        return _transform_feature(x, config, "fprop", config.activation_format).detach()
 
 
-def prepare_mxfp_weight_fprop(weight: torch.Tensor, config: MXFPQATConfig) -> torch.Tensor:
-    with torch.no_grad():
-        return _transform_weight(weight, config, "fprop", config.weight_format, reduction_dim=1).detach()
-
-
-def _call_grouped_matmul(x: torch.Tensor, weight: torch.Tensor, group_list: torch.Tensor, group_list_type: int):
+def _call_grouped_matmul(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    group_list: torch.Tensor,
+    group_list_type: int,
+    *,
+    split_item: int = 2,
+    group_type: int = 0,
+):
     import torch_npu
 
     return torch_npu.npu_grouped_matmul(
@@ -85,8 +117,8 @@ def _call_grouped_matmul(x: torch.Tensor, weight: torch.Tensor, group_list: torc
         [weight],
         bias=None,
         group_list=group_list,
-        split_item=2,
-        group_type=0,
+        split_item=split_item,
+        group_type=group_type,
         group_list_type=group_list_type,
     )[0]
 
@@ -100,7 +132,7 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
         ctx.group_list = group_list
         ctx.group_list_type = int(group_list_type)
         ctx.name = name
-        ctx.save_for_backward(x, weight)
+        need_input_grad, need_weight_grad = ctx.needs_input_grad[:2]
 
         x_fprop = fprop_x if fprop_x is not None else _transform_feature(x, config, "fprop", config.activation_format)
         weight_fprop = (
@@ -108,23 +140,16 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
             if fprop_weight is not None
             else _transform_weight(weight, config, "fprop", config.weight_format, reduction_dim=1)
         )
-        ctx.save_fprop = (x_fprop.detach(), weight_fprop.detach())
-        if config.backward_reduction_axis_fake_quant:
-            with torch.no_grad():
-                dgrad_weight = (
-                    _transform_weight(weight, config, "dgrad", config.weight_format, reduction_dim=2).detach()
-                    if _enabled(config, "dgrad")
-                    else None
-                )
-                wgrad_input = (
-                    _transform_tokens(x, config, "wgrad", config.activation_format).detach()
-                    if _enabled(config, "wgrad")
-                    else None
-                )
-        else:
-            dgrad_weight = None
-            wgrad_input = None
-        ctx.save_backward_operands = (dgrad_weight, wgrad_input)
+        # MoE expert tensors are large. Retain only operands needed by a disabled
+        # backward transform; enabled dgrad/wgrad operands are recomputed when
+        # their gradient runs. save_for_backward lets checkpoint hooks release
+        # retained tensors between forward and backward.
+        ctx.save_for_backward(
+            x if need_weight_grad else None,
+            weight if need_input_grad else None,
+            x_fprop.detach() if need_weight_grad and not _enabled(config, "wgrad") else None,
+            weight_fprop.detach() if need_input_grad and not _enabled(config, "dgrad") else None,
+        )
         warn_once(
             (
                 "moe-fprop",
@@ -143,16 +168,13 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        import torch_npu
-
-        x, weight = ctx.saved_tensors
+        x, weight, x_fprop, weight_fprop = ctx.saved_tensors
         config = ctx.config
         group_list = ctx.group_list
         group_list_type = ctx.group_list_type
-        x_fprop, weight_fprop = ctx.save_fprop
-        dgrad_weight_saved, wgrad_input_saved = ctx.save_backward_operands
+        need_input_grad, need_weight_grad = ctx.needs_input_grad[:2]
 
-        if _enabled(config, "dgrad"):
+        if need_input_grad and _enabled(config, "dgrad"):
             warn_once(
                 (
                     "moe-dgrad",
@@ -162,36 +184,32 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
                     config.fake_quant_targets,
                     config.rotation.targets,
                 ),
-                "moe %s dgrad executed: fake_quant=%s rotation=%s reduction_axis=output cached=%s",
+                "moe %s dgrad executed: fake_quant=%s rotation=%s reduction_axis=output operand=recomputed",
                 ctx.name,
                 "dgrad" in config.fake_quant_targets,
                 config.rotation.enable and "dgrad" in config.rotation.targets,
-                dgrad_weight_saved is not None,
             )
-            grad_output_dgrad = _transform_feature(
-                grad_output, config, "dgrad", config.activation_format
-            ).contiguous()
-            weight_dgrad = (
-                dgrad_weight_saved
-                if dgrad_weight_saved is not None
-                else _transform_weight(weight, config, "dgrad", config.weight_format, reduction_dim=2)
-            )
-        else:
+            grad_output_dgrad = _transform_feature(grad_output, config, "dgrad", config.activation_format).contiguous()
+            weight_dgrad = _transform_weight(weight, config, "dgrad", config.weight_format, reduction_dim=2)
+        elif need_input_grad:
             grad_output_dgrad = grad_output
             weight_dgrad = weight_fprop
 
-        dx = torch_npu.npu_grouped_matmul(
-            [grad_output_dgrad],
-            [weight_dgrad.transpose(1, 2).contiguous()],
-            bias=None,
-            group_list=group_list,
-            split_item=2,
-            group_type=0,
-            group_list_type=group_list_type,
-        )[0]
-        dx = _inverse_input_rotation(dx, config, feature_dim=-1)
+        if need_input_grad:
+            dx = _call_grouped_matmul(
+                grad_output_dgrad,
+                weight_dgrad.transpose(1, 2).contiguous(),
+                group_list,
+                group_list_type,
+            )
+            if not _enabled(config, "dgrad"):
+                # The fallback uses fprop-rotated weights; map dx back to raw input coordinates.
+                dx = _inverse_input_rotation(dx, config, feature_dim=-1)
+        else:
+            dx = None
 
-        if _enabled(config, "wgrad"):
+        wgrad_group_list = group_list
+        if need_weight_grad and _enabled(config, "wgrad"):
             warn_once(
                 (
                     "moe-wgrad",
@@ -201,32 +219,34 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
                     config.fake_quant_targets,
                     config.rotation.targets,
                 ),
-                "moe %s wgrad executed: fake_quant=%s rotation=%s reduction_axis=token cached=%s",
+                "moe %s wgrad executed: fake_quant=%s rotation=%s reduction_axis=token operand=recomputed",
                 ctx.name,
                 "wgrad" in config.fake_quant_targets,
                 config.rotation.enable and "wgrad" in config.rotation.targets,
-                wgrad_input_saved is not None,
             )
-            x_wgrad = (
-                wgrad_input_saved
-                if wgrad_input_saved is not None
-                else _transform_tokens(x, config, "wgrad", config.activation_format)
+            x_wgrad, grad_output_wgrad, wgrad_group_list = _pad_expert_rows(
+                x, grad_output, group_list, group_list_type, config.group_size
             )
-            grad_output_wgrad = _transform_tokens(grad_output, config, "wgrad", config.activation_format)
-        else:
+            x_wgrad = _transform_tokens(x_wgrad, config, "wgrad", config.activation_format)
+            grad_output_wgrad = _transform_tokens(grad_output_wgrad, config, "wgrad", config.activation_format)
+        elif need_weight_grad:
             x_wgrad = x_fprop
             grad_output_wgrad = grad_output
 
-        dw = torch_npu.npu_grouped_matmul(
-            [x_wgrad.transpose(0, 1).contiguous()],
-            [grad_output_wgrad.contiguous()],
-            bias=None,
-            group_list=group_list,
-            split_item=3,
-            group_type=2,
-            group_list_type=group_list_type,
-        )[0]
-        dw = _inverse_input_rotation(dw, config, feature_dim=1)
+        if need_weight_grad:
+            dw = _call_grouped_matmul(
+                x_wgrad.transpose(0, 1),
+                grad_output_wgrad.contiguous(),
+                wgrad_group_list,
+                group_list_type,
+                split_item=3,
+                group_type=2,
+            )
+            if not _enabled(config, "wgrad"):
+                # The fallback uses fprop-rotated activations; map dw back to raw weight coordinates.
+                dw = _inverse_input_rotation(dw, config, feature_dim=1)
+        else:
+            dw = None
         return dx, dw, None, None, None, None, None, None
 
 
