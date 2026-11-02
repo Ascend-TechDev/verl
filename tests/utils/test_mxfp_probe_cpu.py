@@ -129,7 +129,9 @@ def test_probe_is_stable_during_checkpoint_recompute(tmp_path, monkeypatch, high
 
 
 def test_qat_without_probe_preserves_fake_quant_grad_context(monkeypatch):
-    monkeypatch.setattr(mxfp_probe, "_PROBE", None)
+    # Keep a live probe object around to verify the config switch alone keeps
+    # the normal QAT path unchanged.
+    monkeypatch.setattr(mxfp_probe, "_PROBE", SimpleNamespace(active=True))
     quantize_calls = []
 
     def fake_quantize(tensor, fmt, **kwargs):
