@@ -125,6 +125,7 @@ class MXFPQuantErrorProbe:
         quantized_flat = quantized.detach().reshape(-1)
         device = reference.device
         abs_sum = torch.zeros((), device=device, dtype=torch.float32)
+        relative_abs_sum = torch.zeros_like(abs_sum)
         sq_sum = torch.zeros_like(abs_sum)
         max_abs = torch.zeros_like(abs_sum)
         reference_sq_sum = torch.zeros_like(abs_sum)
@@ -135,7 +136,16 @@ class MXFPQuantErrorProbe:
             reference_chunk = reference_flat[start:stop].to(torch.float32)
             error_chunk = quantized_flat[start:stop].to(torch.float32) - reference_chunk
             abs_chunk = error_chunk.abs()
+            reference_abs_chunk = reference_chunk.abs()
+            nonzero_reference = reference_abs_chunk > 0
+            safe_reference_abs = torch.where(nonzero_reference, reference_abs_chunk, 1.0)
+            relative_abs_chunk = torch.where(
+                nonzero_reference,
+                abs_chunk / safe_reference_abs,
+                torch.zeros_like(abs_chunk),
+            )
             abs_sum += abs_chunk.sum()
+            relative_abs_sum += relative_abs_chunk.sum()
             sq_sum += error_chunk.square().sum()
             max_abs = torch.maximum(max_abs, abs_chunk.amax())
             reference_sq_sum += reference_chunk.square().sum()
@@ -145,6 +155,7 @@ class MXFPQuantErrorProbe:
             torch.stack(
                 (
                     abs_sum,
+                    relative_abs_sum,
                     sq_sum,
                     max_abs,
                     reference_sq_sum,
@@ -162,9 +173,10 @@ class MXFPQuantErrorProbe:
             "operand": operand,
             "_count": reference_flat.numel(),
             "_abs_sum": float(stats[0]),
-            "_sq_sum": float(stats[1]),
-            "_max_abs": float(stats[2]),
-            "_reference_sq_sum": float(stats[3]),
+            "_relative_abs_sum": float(stats[1]),
+            "_sq_sum": float(stats[2]),
+            "_max_abs": float(stats[3]),
+            "_reference_sq_sum": float(stats[4]),
             "rank_count": 1,
         }
         records = []
@@ -212,6 +224,7 @@ class MXFPQuantErrorProbe:
                     else:
                         current["_count"] += record["_count"]
                         current["_abs_sum"] += record["_abs_sum"]
+                        current["_relative_abs_sum"] += record["_relative_abs_sum"]
                         current["_sq_sum"] += record["_sq_sum"]
                         current["_max_abs"] = max(current["_max_abs"], record["_max_abs"])
                         current["_reference_sq_sum"] += record["_reference_sq_sum"]
@@ -239,6 +252,7 @@ class MXFPQuantErrorProbe:
             "operand": record["operand"],
             "count": count,
             "mae": record["_abs_sum"] / count if count else 0.0,
+            "relative_abs": record["_relative_abs_sum"] / count if count else 0.0,
             "rmse": (sq_sum / count) ** 0.5 if count else 0.0,
             "max_abs": record["_max_abs"],
             "relative_l2": (sq_sum / ref_sq_sum) ** 0.5 if ref_sq_sum else 0.0,
@@ -286,14 +300,14 @@ th{{position:sticky;top:0;background:#eef2f6}}th:nth-child(-n+5),td:nth-child(-n
 <label>Step<select id="step"></select></label><label>Layer<select id="layer"></select></label>
 <label>Module<select id="module"></select></label><label>Target<select id="target"></select></label>
 </div><canvas id="chart" width="1400" height="280"></canvas>
-<div class="table-wrap"><table><thead><tr><th>Step</th><th>Layer</th><th>Module</th><th>Target</th><th>Operand</th><th>Count</th><th>MAE</th><th>RMSE</th><th>Max abs</th><th>Relative L2</th><th>Ranks</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Step</th><th>Layer</th><th>Module</th><th>Target</th><th>Operand</th><th>Count</th><th>MAE</th><th>Relative abs</th><th>RMSE</th><th>Max abs</th><th>Relative L2</th><th>Ranks</th></tr></thead><tbody id="rows"></tbody></table></div>
 <script>const allRecords={safe_data};
 const fields=['step','layer','module','target'];const selects=Object.fromEntries(fields.map(k=>[k,document.getElementById(k)]));
 function options(key){{const values=[...new Set(allRecords.map(r=>String(r[key])))].sort((a,b)=>Number(a)-Number(b)||a.localeCompare(b));return ['all',...values]}}
 for(const key of fields){{selects[key].innerHTML=options(key).map(v=>`<option value="${{v}}">${{v==='all'?'All':key==='layer'&&v!=='all'?'Layer '+v:v}}</option>`).join('');selects[key].onchange=render}}
 if(allRecords.length)selects.step.value=String(Math.max(...allRecords.map(r=>r.step)));
 function filtered(){{return allRecords.filter(r=>fields.every(k=>selects[k].value==='all'||String(r[k])===selects[k].value))}}
-function render(){{const rows=filtered();document.getElementById('rows').innerHTML=rows.map(r=>`<tr><td>${{r.step}}</td><td>${{r.layer_name}}</td><td>${{r.module}}</td><td>${{r.target}}</td><td>${{r.operand}}</td><td>${{r.count.toLocaleString()}}</td><td>${{r.mae.toExponential(3)}}</td><td>${{r.rmse.toExponential(3)}}</td><td>${{r.max_abs.toExponential(3)}}</td><td>${{r.relative_l2.toExponential(3)}}</td><td>${{r.rank_count}}</td></tr>`).join('');
+function render(){{const rows=filtered();document.getElementById('rows').innerHTML=rows.map(r=>`<tr><td>${{r.step}}</td><td>${{r.layer_name}}</td><td>${{r.module}}</td><td>${{r.target}}</td><td>${{r.operand}}</td><td>${{r.count.toLocaleString()}}</td><td>${{r.mae.toExponential(3)}}</td><td>${{r.relative_abs.toExponential(3)}}</td><td>${{r.rmse.toExponential(3)}}</td><td>${{r.max_abs.toExponential(3)}}</td><td>${{r.relative_l2.toExponential(3)}}</td><td>${{r.rank_count}}</td></tr>`).join('');
 document.getElementById('summary').innerHTML=[['Records',rows.length],['Steps',new Set(rows.map(r=>r.step)).size],['Layers',new Set(rows.map(r=>r.layer_name)).size],['Modules',new Set(rows.map(r=>r.module)).size]].map(([k,v])=>`<div class="card"><b>${{k}}</b><br>${{v}}</div>`).join('');draw(rows)}}
 function draw(rows){{const c=document.getElementById('chart'),ctx=c.getContext('2d');ctx.clearRect(0,0,c.width,c.height);if(!rows.length)return;const vals=rows.map(r=>r.rmse),max=Math.max(...vals,1e-30),left=76,top=22,bottom=42,w=(c.width-left-20)/rows.length;ctx.fillStyle='#263746';ctx.font='13px system-ui';ctx.fillText('RMSE (log scale)',12,18);rows.forEach((r,i)=>{{const h=(Math.log10(Math.max(r.rmse,1e-30))-Math.log10(max/1000))/(3)* (c.height-top-bottom);const bar=Math.max(2,Math.min(c.height-top-bottom,h));const x=left+i*w;ctx.fillStyle=['#3478c5','#e48636','#3b9c74','#a45ca8'][i%4];ctx.fillRect(x+2,c.height-bottom-bar,Math.max(3,w-4),bar);ctx.save();ctx.translate(x+w/2,c.height-bottom+8);ctx.rotate(-Math.PI/4);ctx.textAlign='right';ctx.fillStyle='#334';ctx.fillText(`${{r.step}} · L${{r.layer}} ${{r.module}}/${{r.target}} ${{r.operand}}`,0,0);ctx.restore()}})}}render();</script></body></html>"""
 

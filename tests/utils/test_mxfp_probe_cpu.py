@@ -56,8 +56,12 @@ def test_probe_deduplicates_key_uses_high_precision_and_writes_html(tmp_path, mo
     assert record["operand"] == "activation"
     assert record["count"] == source.numel()
     assert record["mae"] > 0
+    quantized = torch.round(source * 2) / 2
+    expected_relative_abs = torch.where(source != 0, (quantized - source).abs() / source.abs(), 0).mean()
+    assert record["relative_abs"] == pytest.approx(expected_relative_abs.item())
     html = output.with_suffix(".html").read_text(encoding="utf-8")
     assert "MXFP QDQ Error Probe" in html
+    assert "Relative abs" in html
     assert "q" in html
 
 
