@@ -126,3 +126,28 @@ def test_probe_is_stable_during_checkpoint_recompute(tmp_path, monkeypatch, high
     qdq_input = source.detach() if high_precision else torch.round(source.detach() * 2) / 2
     torch.testing.assert_close(result.detach(), qdq_input.sin())
     torch.testing.assert_close(source.grad, qdq_input.cos())
+
+
+def test_qat_without_probe_preserves_fake_quant_grad_context(monkeypatch):
+    monkeypatch.setattr(mxfp_probe, "_PROBE", None)
+    quantize_calls = []
+
+    def fake_quantize(tensor, fmt, **kwargs):
+        quantize_calls.append((torch.is_grad_enabled(), tensor.requires_grad))
+        return tensor + 0.25
+
+    monkeypatch.setattr(mxfp_quant, "fake_quantize", fake_quantize)
+    source = torch.ones((1, 32), requires_grad=True)
+
+    result = quantize_with_probe(
+        source,
+        "mxfp8",
+        _config(probe_quant_error=False),
+        target="fprop",
+        operand="activation",
+    )
+
+    torch.testing.assert_close(result, source + 0.25)
+    assert quantize_calls == [(True, True)]
+    result.sum().backward()
+    torch.testing.assert_close(source.grad, torch.ones_like(source))

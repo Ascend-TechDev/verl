@@ -350,11 +350,20 @@ def quantize_with_probe(
     if high_precision and not record_names:
         return tensor
 
-    # QDQ is detached by the STE below; building its autograd graph only adds
-    # saved tensors that activation checkpointing must otherwise replay exactly.
-    with torch.no_grad():
+    if probe_configured:
+        # Probe QDQ values are observations or detached STE values, so do not
+        # add probe-only tensors to activation checkpoint's saved-tensor list.
+        with torch.no_grad():
+            quantized = fake_quantize(
+                tensor.detach(),
+                fmt,
+                quant_backend=config.quant_backend,
+                rounding_mode=config.rounding_mode,
+                mxfp4_scale_alg=getattr(config, "mxfp4_scale_alg", "standard"),
+            )
+    else:
         quantized = fake_quantize(
-            tensor.detach(),
+            tensor,
             fmt,
             quant_backend=config.quant_backend,
             rounding_mode=config.rounding_mode,
