@@ -334,26 +334,32 @@ def quantize_with_probe(
     if target not in config.fake_quant_targets:
         return tensor
 
-    probe_enabled = bool(getattr(config, "probe_quant_error", False)) and _PROBE is not None and _PROBE.active
+    probe_configured = bool(getattr(config, "probe_quant_error", False)) and _PROBE is not None
+    probe_active = probe_configured and _PROBE.active
     layer_name = getattr(config, "layer_name", None) or "<unknown>"
     module_name = module_name or layer_name.rsplit(".", 1)[-1]
     module_names = probe_module_names or (module_name,)
     record_names = (
         [name for name in dict.fromkeys(module_names) if _PROBE.claim(layer_name, name, target, operand)]
-        if probe_enabled
+        if probe_active
         else []
     )
-    high_precision = probe_enabled and bool(getattr(config, "probe_quant_error_use_high_precision", True))
+    # Keep the model-visible path independent of the per-step probe state. A
+    # checkpoint recomputation may run without the ContextVar set by begin_step.
+    high_precision = probe_configured and bool(getattr(config, "probe_quant_error_use_high_precision", True))
     if high_precision and not record_names:
         return tensor
 
-    quantized = fake_quantize(
-        tensor,
-        fmt,
-        quant_backend=config.quant_backend,
-        rounding_mode=config.rounding_mode,
-        mxfp4_scale_alg=getattr(config, "mxfp4_scale_alg", "standard"),
-    )
+    # QDQ is detached by the STE below; building its autograd graph only adds
+    # saved tensors that activation checkpointing must otherwise replay exactly.
+    with torch.no_grad():
+        quantized = fake_quantize(
+            tensor.detach(),
+            fmt,
+            quant_backend=config.quant_backend,
+            rounding_mode=config.rounding_mode,
+            mxfp4_scale_alg=getattr(config, "mxfp4_scale_alg", "standard"),
+        )
     if record_names:
         _PROBE.record_many(
             layer_name,

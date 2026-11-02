@@ -1,7 +1,9 @@
 import json
 from types import SimpleNamespace
 
+import pytest
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from verl.utils.qat import mxfp_probe, mxfp_quant
 from verl.utils.qat.mxfp_probe import (
@@ -85,3 +87,42 @@ def test_probe_low_precision_path_returns_qdq_and_keeps_one_record(tmp_path, mon
     payload = json.loads((tmp_path / "probe" / "mxfp_quant_error.json").read_text(encoding="utf-8"))
     assert len(payload["records"]) == 1
     assert (tmp_path / "probe" / "mxfp_quant_error.html").exists()
+
+
+@pytest.mark.parametrize(("high_precision", "expected_quantize_calls"), ((True, 1), (False, 2)))
+def test_probe_is_stable_during_checkpoint_recompute(tmp_path, monkeypatch, high_precision, expected_quantize_calls):
+    output = tmp_path / "probe"
+    probe = mxfp_probe.MXFPQuantErrorProbe(output)
+    monkeypatch.setattr(mxfp_probe, "_PROBE", probe)
+    quantize_calls = []
+
+    def fake_quantize(tensor, fmt, **kwargs):
+        quantize_calls.append((torch.is_grad_enabled(), tensor.requires_grad))
+        return torch.round(tensor * 2) / 2
+
+    monkeypatch.setattr(mxfp_quant, "fake_quantize", fake_quantize)
+    step = begin_quant_error_probe_step(output, 7)
+    source = torch.randn((2, 32), requires_grad=True)
+
+    def run(value):
+        quantized = quantize_with_probe(
+            value,
+            "mxfp8",
+            _config(probe_quant_error_use_high_precision=high_precision),
+            target="fprop",
+            operand="activation",
+        )
+        return quantized.sin()
+
+    result = checkpoint(run, source, use_reentrant=False)
+    assert result.shape == source.shape
+    assert result.dtype == source.dtype
+
+    # Simulate checkpoint recomputation after the probe ContextVar is no longer active.
+    finish_quant_error_probe_step(step)
+    result.sum().backward()
+
+    assert quantize_calls == [(False, False)] * expected_quantize_calls
+    qdq_input = source.detach() if high_precision else torch.round(source.detach() * 2) / 2
+    torch.testing.assert_close(result.detach(), qdq_input.sin())
+    torch.testing.assert_close(source.grad, qdq_input.cos())
