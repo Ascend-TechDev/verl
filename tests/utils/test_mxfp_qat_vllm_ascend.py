@@ -85,3 +85,38 @@ def test_mxfp_qat_config_rejects_npu_stochastic_rounding():
         mxfp_qat_config_to_vllm_ascend_env(
             {"mode": "mxfp_w8a8", "group_size": 32, "quant_backend": "npu", "rounding_mode": "hash"}
         )
+
+
+@pytest.mark.parametrize("fprop", [False, True])
+@pytest.mark.parametrize("bprop", [False, True])
+def test_activation_residual_bridge_only_forwards_fprop_switch(fprop, bprop):
+    if bprop:
+        with pytest.raises(NotImplementedError, match="awaiting confirmation"):
+            mxfp_qat_config_to_vllm_ascend_env(
+                {
+                    "mode": "mxfp_w4a8",
+                    "group_size": 32,
+                    "quant_backend": "torch",
+                    "activation_residual_fprop": fprop,
+                    "activation_residual_bprop": bprop,
+                }
+            )
+        return
+    env = mxfp_qat_config_to_vllm_ascend_env(
+        {
+            "mode": "mxfp_w4a8",
+            "group_size": 32,
+            "quant_backend": "torch",
+            "activation_residual_fprop": fprop,
+            "activation_residual_bprop": bprop,
+        }
+    )
+    assert env["VLLM_ASCEND_QAT_MXFP8_ACTIVATION_RESIDUAL_FPROP"] == str(fprop).lower()
+    assert not any("RESIDUAL_BPROP" in key for key in env)
+
+
+def test_activation_residual_bridge_clears_previously_enabled_rollout():
+    env = mxfp_qat_config_to_vllm_ascend_env(
+        {"mode": "mxfp_w4a8", "group_size": 32, "quant_backend": "torch"}
+    )
+    assert env["VLLM_ASCEND_QAT_MXFP8_ACTIVATION_RESIDUAL_FPROP"] == "false"

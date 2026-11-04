@@ -872,7 +872,7 @@ class vLLMHttpServer:
             logger.warning(
                 "MXFP rollout fake quant enabled on vLLM-Ascend high-precision path: mode=%s, "
                 "backend=%s, rounding=%s, mxfp4_scale_alg=%s, group_size=%s, fake_quant_targets=%s, rotation=%s, "
-                "rotation_targets=%s, rotation_block_size=%s, rotation_seed=%s",
+                "rotation_targets=%s, rotation_block_size=%s, rotation_seed=%s, activation_residual_fprop=%s",
                 fake_quant_env["VLLM_ASCEND_QAT_FAKE_QUANT_MODE"],
                 fake_quant_env["VLLM_ASCEND_QAT_MXFP8_QUANT_BACKEND"],
                 fake_quant_env["VLLM_ASCEND_QAT_MXFP8_ROUNDING_MODE"],
@@ -883,6 +883,7 @@ class vLLMHttpServer:
                 fake_quant_env["VLLM_ASCEND_QAT_MXFP8_ROTATION_TARGETS"],
                 fake_quant_env["VLLM_ASCEND_QAT_MXFP8_ROTATION_BLOCK_SIZE"],
                 fake_quant_env["VLLM_ASCEND_QAT_MXFP8_ROTATION_SEED"],
+                fake_quant_env["VLLM_ASCEND_QAT_MXFP8_ACTIVATION_RESIDUAL_FPROP"],
             )
             hf_overrides["quantization_config"] = None
             if quantization is not None:

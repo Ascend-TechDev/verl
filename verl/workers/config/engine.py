@@ -158,6 +158,8 @@ class QATEngineConfig(BaseConfig):
     mxfp4_scale_alg: str = "standard"
     fake_quant_targets: list[str] = field(default_factory=lambda: ["Fprop"])
     backward_reduction_axis_fake_quant: bool = False
+    activation_residual_fprop: bool = False
+    activation_residual_bprop: bool = False
     rotation_enable: bool = False
     rotation_targets: list[str] = field(default_factory=lambda: ["Fprop"])
     rotation_block_size: int = 32

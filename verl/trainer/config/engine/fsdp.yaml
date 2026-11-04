@@ -118,6 +118,12 @@ qat:
   # Cache a separately quantized operand for the backward reduction axis when true.
   backward_reduction_axis_fake_quant: false
 
+  # Complete floating-point activation residual branch in forward (also sent to rollout).
+  activation_residual_fprop: false
+
+  # Independently enable activation-side residual compensation in backward.
+  activation_residual_bprop: false
+
   # Enable deterministic block-local rotation before the selected MXFP transforms.
   rotation_enable: false
 

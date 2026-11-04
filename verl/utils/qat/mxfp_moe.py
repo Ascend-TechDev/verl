@@ -224,7 +224,16 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
             "fprop" in config.fake_quant_targets,
             config.rotation.enable and "fprop" in config.rotation.targets,
         )
-        return _call_grouped_matmul(x_fprop, weight_fprop, group_list, ctx.group_list_type)
+        output = _call_grouped_matmul(x_fprop, weight_fprop, group_list, ctx.group_list_type)
+        if config.activation_residual_fprop:
+            # Use the same coordinates and the same weight as the main branch,
+            # including when gate/up share an externally prepared activation.
+            values = x
+            if config.rotation.enable and "fprop" in config.rotation.targets:
+                values = rotate_blocks(values, config.rotation)
+            residual = values - x_fprop
+            output = output + _call_grouped_matmul(residual, weight_fprop, group_list, ctx.group_list_type)
+        return output
 
     @staticmethod
     def backward(ctx, grad_output):

@@ -43,6 +43,8 @@ class QATConfig(BaseConfig):
     mxfp4_scale_alg: str = "standard"
     fake_quant_targets: list[str] = field(default_factory=lambda: ["Fprop"])
     backward_reduction_axis_fake_quant: bool = False
+    activation_residual_fprop: bool = False
+    activation_residual_bprop: bool = False
     rotation_enable: bool = False
     rotation_targets: list[str] = field(default_factory=lambda: ["Fprop"])
     rotation_block_size: int = 32
@@ -142,6 +144,8 @@ def apply_qat(
             mxfp4_scale_alg=config.mxfp4_scale_alg,
             fake_quant_targets=config.fake_quant_targets,
             backward_reduction_axis_fake_quant=config.backward_reduction_axis_fake_quant,
+            activation_residual_fprop=config.activation_residual_fprop,
+            activation_residual_bprop=config.activation_residual_bprop,
             rotation_enable=config.rotation_enable,
             rotation_targets=config.rotation_targets,
             rotation_block_size=config.rotation_block_size,
@@ -189,10 +193,12 @@ def apply_qat(
                 config.rotation_enable,
                 config.mxfp4_scale_alg,
                 experts_enabled,
+                config.activation_residual_fprop,
+                config.activation_residual_bprop,
             ),
             "FSDP2 MXFP QAT configured: mode=%s dense_linear=%d moe_blocks=%d experts=%s "
             "fprop=%s dgrad=%s wgrad=%s rotation=%s rotation_targets=%s mxfp4_scale_alg=%s "
-            "backward_axis_cache=%s",
+            "backward_axis_cache=%s activation_residual_fprop=%s activation_residual_bprop=%s",
             mxfp_mode.value,
             len(modules_to_replace),
             moe_count,
@@ -204,6 +210,8 @@ def apply_qat(
             mxfp_config.rotation.targets,
             mxfp_config.mxfp4_scale_alg,
             mxfp_config.backward_reduction_axis_fake_quant,
+            mxfp_config.activation_residual_fprop,
+            mxfp_config.activation_residual_bprop,
         )
         return model
 

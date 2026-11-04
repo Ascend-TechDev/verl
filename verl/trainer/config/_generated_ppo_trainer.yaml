@@ -62,6 +62,8 @@ actor_rollout_ref:
         fake_quant_targets:
         - Fprop
         backward_reduction_axis_fake_quant: false
+        activation_residual_fprop: false
+        activation_residual_bprop: false
         rotation_enable: false
         rotation_targets:
         - Fprop
@@ -254,6 +256,8 @@ actor_rollout_ref:
         fake_quant_targets:
         - Fprop
         backward_reduction_axis_fake_quant: false
+        activation_residual_fprop: false
+        activation_residual_bprop: false
         rotation_enable: false
         rotation_targets:
         - Fprop
@@ -565,6 +569,8 @@ critic:
       fake_quant_targets:
       - Fprop
       backward_reduction_axis_fake_quant: false
+      activation_residual_fprop: false
+      activation_residual_bprop: false
       rotation_enable: false
       rotation_targets:
       - Fprop
