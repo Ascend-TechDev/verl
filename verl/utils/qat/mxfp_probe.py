@@ -69,13 +69,20 @@ class MXFPQuantErrorProbe:
         self._history: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
         self._claimed: set[tuple[int, str, str, str, str]] = set()
         self._fallback_step = 0
+        self._first_step_collected = False
         self._lock = threading.Lock()
 
     @property
     def active(self) -> bool:
         return _ACTIVE_STEP.get() is not None
 
-    def begin_step(self, step: int | None) -> int:
+    def begin_step(self, step: int | None, *, first_step_only: bool = False) -> int | None:
+        if first_step_only:
+            with self._lock:
+                if self._first_step_collected:
+                    _ACTIVE_STEP.set(None)
+                    return None
+                self._first_step_collected = True
         if step is None:
             self._fallback_step += 1
             step = self._fallback_step
@@ -320,8 +327,10 @@ def configure_quant_error_probe(output_path: str | os.PathLike[str]) -> MXFPQuan
         return _PROBE
 
 
-def begin_quant_error_probe_step(output_path: str | os.PathLike[str], step: int | None) -> int:
-    return configure_quant_error_probe(output_path).begin_step(step)
+def begin_quant_error_probe_step(
+    output_path: str | os.PathLike[str], step: int | None, *, first_step_only: bool = False
+) -> int | None:
+    return configure_quant_error_probe(output_path).begin_step(step, first_step_only=first_step_only)
 
 
 def finish_quant_error_probe_step(step: int) -> None:

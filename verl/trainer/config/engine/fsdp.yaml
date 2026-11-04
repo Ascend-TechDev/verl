@@ -137,6 +137,9 @@ qat:
   # Keep matmul operands high precision while probing; QDQ values are used only for error metrics.
   probe_quant_error_use_high_precision: true
 
+  # Collect quantization error only during the first actor update of this run.
+  probe_quant_error_first_step_only: false
+
   # Optional per-layer fallback policy. null keeps all eligible layers on the configured MXFP path.
   fallback_layers: null
 

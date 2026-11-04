@@ -93,6 +93,37 @@ def test_probe_low_precision_path_returns_qdq_and_keeps_one_record(tmp_path, mon
     assert (tmp_path / "probe" / "mxfp_quant_error.html").exists()
 
 
+def test_probe_first_step_only_keeps_qdq_enabled_after_sampling(tmp_path, monkeypatch):
+    output = tmp_path / "probe"
+    probe = mxfp_probe.MXFPQuantErrorProbe(output)
+    monkeypatch.setattr(mxfp_probe, "_PROBE", probe)
+    quantize_calls = 0
+
+    def fake_quantize(tensor, fmt, **kwargs):
+        nonlocal quantize_calls
+        quantize_calls += 1
+        return tensor + 0.25
+
+    monkeypatch.setattr(mxfp_quant, "fake_quantize", fake_quantize)
+    config = _config(probe_quant_error_use_high_precision=False)
+    source = torch.ones((1, 32))
+
+    first_step = begin_quant_error_probe_step(output, 1, first_step_only=True)
+    assert first_step == 1
+    first = quantize_with_probe(source, "mxfp8", config, target="fprop", operand="activation")
+    finish_quant_error_probe_step(first_step)
+
+    second_step = begin_quant_error_probe_step(output, 2, first_step_only=True)
+    assert second_step is None
+    second = quantize_with_probe(source * 2, "mxfp8", config, target="fprop", operand="activation")
+
+    assert torch.equal(first, source + 0.25)
+    assert torch.equal(second, source * 2 + 0.25)
+    assert quantize_calls == 2
+    payload = json.loads((tmp_path / "probe" / "mxfp_quant_error.json").read_text(encoding="utf-8"))
+    assert {record["step"] for record in payload["records"]} == {1}
+
+
 @pytest.mark.parametrize(("high_precision", "expected_quantize_calls"), ((True, 1), (False, 2)))
 def test_probe_is_stable_during_checkpoint_recompute(tmp_path, monkeypatch, high_precision, expected_quantize_calls):
     output = tmp_path / "probe"
