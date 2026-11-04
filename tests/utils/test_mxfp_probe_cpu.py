@@ -26,7 +26,7 @@ def _config(**kwargs):
     return SimpleNamespace(**defaults)
 
 
-def test_probe_deduplicates_key_uses_high_precision_and_writes_html(tmp_path, monkeypatch):
+def test_probe_deduplicates_key_uses_high_precision_and_writes_json_only(tmp_path, monkeypatch):
     output = tmp_path / "probe.json"
     probe = mxfp_probe.MXFPQuantErrorProbe(output)
     monkeypatch.setattr(mxfp_probe, "_PROBE", probe)
@@ -59,10 +59,7 @@ def test_probe_deduplicates_key_uses_high_precision_and_writes_html(tmp_path, mo
     quantized = torch.round(source * 2) / 2
     expected_relative_abs = torch.where(source != 0, (quantized - source).abs() / source.abs(), 0).mean()
     assert record["relative_abs"] == pytest.approx(expected_relative_abs.item())
-    html = output.with_suffix(".html").read_text(encoding="utf-8")
-    assert "MXFP QDQ Error Probe" in html
-    assert "Relative abs" in html
-    assert "q" in html
+    assert not output.with_suffix(".html").exists()
 
 
 def test_probe_low_precision_path_returns_qdq_and_keeps_one_record(tmp_path, monkeypatch):
@@ -90,7 +87,7 @@ def test_probe_low_precision_path_returns_qdq_and_keeps_one_record(tmp_path, mon
     finish_quant_error_probe_step(step)
     payload = json.loads((tmp_path / "probe" / "mxfp_quant_error.json").read_text(encoding="utf-8"))
     assert len(payload["records"]) == 1
-    assert (tmp_path / "probe" / "mxfp_quant_error.html").exists()
+    assert not (tmp_path / "probe" / "mxfp_quant_error.html").exists()
 
 
 def test_probe_first_step_only_keeps_qdq_enabled_after_sampling(tmp_path, monkeypatch):
