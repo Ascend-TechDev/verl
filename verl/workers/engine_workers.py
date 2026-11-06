@@ -297,7 +297,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
             from verl.utils.qat.mxfp_probe import begin_quant_error_probe_step
 
             if is_mxfp_mode(qat_config.mode):
-                probe_step = begin_quant_error_probe_step(qat_config.probe_quant_error_output_path, qat_probe_step)
+                probe_step = begin_quant_error_probe_step(
+                    qat_config.probe_quant_error_output_path,
+                    qat_probe_step,
+                    first_step_only=getattr(qat_config, "probe_quant_error_first_step_only", False),
+                )
             else:
                 probe_enabled = False
 
@@ -350,7 +354,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
             else:
                 output = None
-        if probe_enabled:
+        if probe_step is not None:
             from verl.utils.qat.mxfp_probe import finish_quant_error_probe_step
 
             finish_quant_error_probe_step(probe_step)

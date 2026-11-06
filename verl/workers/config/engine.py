@@ -165,6 +165,7 @@ class QATEngineConfig(BaseConfig):
     probe_quant_error: bool = False
     probe_quant_error_output_path: Optional[str] = None
     probe_quant_error_use_high_precision: bool = True
+    probe_quant_error_first_step_only: bool = False
     fallback_layers: Any = None
     experts: QATExpertsConfig = field(default_factory=QATExpertsConfig)
 
