@@ -69,10 +69,6 @@ class MXFPQATConfig:
     probe_quant_error_use_high_precision: bool = True
 
     def __post_init__(self):
-        if self.activation_residual_bprop:
-            raise NotImplementedError(
-                "Backward activation residual scope (A only or A and grad_output) is awaiting confirmation"
-            )
         mode = normalize_mxfp_mode(self.mode)
         object.__setattr__(self, "mode", mode.value)
         object.__setattr__(self, "quant_backend", str(self.quant_backend).lower())
@@ -149,6 +145,19 @@ def _prepare_wgrad_input(input: torch.Tensor, config: MXFPQATConfig) -> torch.Te
         return _target_tensor(input_2d.transpose(0, 1), config, "wgrad", config.activation_format, pad_rotation=True)
 
 
+def _prepare_wgrad_reference_input(
+    original_input: torch.Tensor, config: MXFPQATConfig, wgrad_enabled: bool
+) -> torch.Tensor:
+    """Map original A to the main wgrad coordinates, without either A QDQ."""
+    values = original_input
+    if config.rotation.enable and "fprop" in config.rotation.targets:
+        values = rotate_blocks(values, config.rotation)
+    values_t = values.reshape(-1, values.shape[-1]).transpose(0, 1)
+    if wgrad_enabled and config.rotation.enable and "wgrad" in config.rotation.targets:
+        values_t = rotate_blocks(values_t, config.rotation, pad_to_block=True)
+    return values_t
+
+
 def _add_fprop_activation_residual(
     output: torch.Tensor,
     input: torch.Tensor,
@@ -171,7 +180,9 @@ def _add_fprop_activation_residual(
 
 class _MXFPLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input, weight, bias, dgrad_weight, wgrad_input_t, config, dgrad_enabled, wgrad_enabled):
+    def forward(
+        ctx, input, weight, bias, dgrad_weight, wgrad_input_t, config, dgrad_enabled, wgrad_enabled, original_input
+    ):
         ctx.has_saved_dgrad_weight = dgrad_weight is not None
         ctx.has_saved_wgrad_input = wgrad_input_t is not None
         ctx.dgrad_enabled = dgrad_enabled
@@ -183,12 +194,13 @@ class _MXFPLinear(torch.autograd.Function):
             weight,
             dgrad_weight if dgrad_weight is not None else weight,
             wgrad_input_t if wgrad_input_t is not None else input,
+            original_input if config.activation_residual_bprop and ctx.needs_input_grad[1] else None,
         )
         return F.linear(input, weight, bias)
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, weight, saved_dgrad_weight, saved_wgrad_input_t = ctx.saved_tensors
+        input, weight, saved_dgrad_weight, saved_wgrad_input_t, original_input = ctx.saved_tensors
         config = ctx.config
         input_2d = input.reshape(-1, input.shape[-1])
         grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
@@ -260,9 +272,16 @@ class _MXFPLinear(torch.autograd.Function):
                 input_t = input_2d.transpose(0, 1)
                 grad_output_t = grad_output_2d.transpose(0, 1)
             grad_weight = grad_output_t.matmul(input_t.transpose(0, 1))
+            if config.activation_residual_bprop:
+                # Dense wgrad starts from fprop Aq, then may quantize A again
+                # along tokens. Reference original A so both errors are covered.
+                reference_input_t = _prepare_wgrad_reference_input(original_input, config, ctx.wgrad_enabled)
+                residual_t = reference_input_t - input_t
+                # Reuse the exact main-branch G. Neither G nor W is compensated.
+                grad_weight = grad_weight + grad_output_t.matmul(residual_t.transpose(0, 1))
 
         grad_bias = grad_output_2d.sum(dim=0) if not ctx.bias_is_none and ctx.needs_input_grad[2] else None
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None
 
 
 class MXFPQATLinear(nn.Linear):
@@ -326,7 +345,9 @@ class MXFPQATLinear(nn.Linear):
         if not input.requires_grad and not self.weight.requires_grad:
             return _add_fprop_activation_residual(F.linear(values, weight, self.bias), input, values, weight, config)
 
-        needs_custom_backward = config.rotation.enable and "fprop" in config.rotation.targets
+        needs_custom_backward = config.activation_residual_bprop or (
+            config.rotation.enable and "fprop" in config.rotation.targets
+        )
         needs_custom_backward = needs_custom_backward or any(
             target in config.fake_quant_targets or (config.rotation.enable and target in config.rotation.targets)
             for target in ("dgrad", "wgrad")
@@ -348,7 +369,15 @@ class MXFPQATLinear(nn.Linear):
             if wgrad_enabled and self.weight.requires_grad:
                 wgrad_input_t = _prepare_wgrad_input(values, config)
         output = _MXFPLinear.apply(
-            values, weight, self.bias, dgrad_weight, wgrad_input_t, config, dgrad_enabled, wgrad_enabled
+            values,
+            weight,
+            self.bias,
+            dgrad_weight,
+            wgrad_input_t,
+            config,
+            dgrad_enabled,
+            wgrad_enabled,
+            input.detach() if config.activation_residual_bprop and self.weight.requires_grad else None,
         )
         return _add_fprop_activation_residual(output, input, values, weight, config)
 

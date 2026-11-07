@@ -44,6 +44,7 @@ class QATConfig(BaseConfig):
     fake_quant_targets: list[str] = field(default_factory=lambda: ["Fprop"])
     backward_reduction_axis_fake_quant: bool = False
     activation_residual_fprop: bool = False
+    # Compensate only the input A operand of Wgrad, using the same grad_output as the main path.
     activation_residual_bprop: bool = False
     rotation_enable: bool = False
     rotation_targets: list[str] = field(default_factory=lambda: ["Fprop"])

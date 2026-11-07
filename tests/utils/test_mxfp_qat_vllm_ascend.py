@@ -46,9 +46,7 @@ def test_mxfp_qat_config_maps_vllm_ascend_env(mode, expected_mode):
 
 
 def test_mxfp_qat_config_keeps_disabled_experts_in_high_precision():
-    env = mxfp_qat_config_to_vllm_ascend_env(
-        {"mode": "mxfp_w8a8", "group_size": 32, "experts": {"enable": False}}
-    )
+    env = mxfp_qat_config_to_vllm_ascend_env({"mode": "mxfp_w8a8", "group_size": 32, "experts": {"enable": False}})
 
     ignore_patterns = json.loads(env["VLLM_ASCEND_QAT_MXFP8_IGNORE_PATTERNS"])
     assert any("mlp\\.experts" in pattern for pattern in ignore_patterns)
@@ -90,18 +88,6 @@ def test_mxfp_qat_config_rejects_npu_stochastic_rounding():
 @pytest.mark.parametrize("fprop", [False, True])
 @pytest.mark.parametrize("bprop", [False, True])
 def test_activation_residual_bridge_only_forwards_fprop_switch(fprop, bprop):
-    if bprop:
-        with pytest.raises(NotImplementedError, match="awaiting confirmation"):
-            mxfp_qat_config_to_vllm_ascend_env(
-                {
-                    "mode": "mxfp_w4a8",
-                    "group_size": 32,
-                    "quant_backend": "torch",
-                    "activation_residual_fprop": fprop,
-                    "activation_residual_bprop": bprop,
-                }
-            )
-        return
     env = mxfp_qat_config_to_vllm_ascend_env(
         {
             "mode": "mxfp_w4a8",
@@ -116,7 +102,5 @@ def test_activation_residual_bridge_only_forwards_fprop_switch(fprop, bprop):
 
 
 def test_activation_residual_bridge_clears_previously_enabled_rollout():
-    env = mxfp_qat_config_to_vllm_ascend_env(
-        {"mode": "mxfp_w4a8", "group_size": 32, "quant_backend": "torch"}
-    )
+    env = mxfp_qat_config_to_vllm_ascend_env({"mode": "mxfp_w4a8", "group_size": 32, "quant_backend": "torch"})
     assert env["VLLM_ASCEND_QAT_MXFP8_ACTIVATION_RESIDUAL_FPROP"] == "false"

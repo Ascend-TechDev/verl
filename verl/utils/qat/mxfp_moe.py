@@ -305,6 +305,14 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
             x_wgrad, grad_output_wgrad, wgrad_group_list, valid_token_indices = _pad_expert_rows(
                 x, grad_output, group_list, group_list_type, config.group_size
             )
+            if config.activation_residual_bprop:
+                # Preserve the padded original A in the same token-rotation
+                # coordinates as the main branch, without residual QDQ.
+                x_wgrad_reference = x_wgrad
+                if config.rotation.enable and "wgrad" in config.rotation.targets:
+                    x_wgrad_reference = (
+                        rotate_blocks(x_wgrad_reference.transpose(0, 1), config.rotation).transpose(0, 1).contiguous()
+                    )
             x_wgrad = _transform_tokens(
                 x_wgrad,
                 config,
@@ -325,16 +333,31 @@ class _MXFPGroupedMatmul(torch.autograd.Function):
         elif need_weight_grad:
             x_wgrad = x_fprop
             grad_output_wgrad = grad_output
+            if config.activation_residual_bprop:
+                x_wgrad_reference = x
+                if config.rotation.enable and "fprop" in config.rotation.targets:
+                    x_wgrad_reference = rotate_blocks(x_wgrad_reference, config.rotation)
 
         if need_weight_grad:
+            grad_output_wgrad = grad_output_wgrad.contiguous()
             dw = _call_grouped_matmul(
                 x_wgrad.transpose(0, 1),
-                grad_output_wgrad.contiguous(),
+                grad_output_wgrad,
                 wgrad_group_list,
                 group_list_type,
                 split_item=3,
                 group_type=2,
             )
+            if config.activation_residual_bprop:
+                residual = x_wgrad_reference - x_wgrad
+                dw = dw + _call_grouped_matmul(
+                    residual.transpose(0, 1),
+                    grad_output_wgrad,
+                    wgrad_group_list,
+                    group_list_type,
+                    split_item=3,
+                    group_type=2,
+                )
             if not _enabled(config, "wgrad"):
                 # The fallback uses fprop-rotated activations; map dw back to raw weight coordinates.
                 dw = _inverse_input_rotation(dw, config, feature_dim=1)

@@ -159,6 +159,7 @@ class QATEngineConfig(BaseConfig):
     fake_quant_targets: list[str] = field(default_factory=lambda: ["Fprop"])
     backward_reduction_axis_fake_quant: bool = False
     activation_residual_fprop: bool = False
+    # Full input-activation residual in Wgrad only; grad_output and Dgrad keep their existing precision.
     activation_residual_bprop: bool = False
     rotation_enable: bool = False
     rotation_targets: list[str] = field(default_factory=lambda: ["Fprop"])
