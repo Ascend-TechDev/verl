@@ -72,6 +72,7 @@ actor_rollout_ref:
         probe_quant_error: false
         probe_quant_error_output_path: null
         probe_quant_error_use_high_precision: true
+        probe_quant_error_first_step_only: false
         fallback_layers: null
         experts:
           enable: false
@@ -266,6 +267,7 @@ actor_rollout_ref:
         probe_quant_error: false
         probe_quant_error_output_path: null
         probe_quant_error_use_high_precision: true
+        probe_quant_error_first_step_only: false
         fallback_layers: null
         experts:
           enable: false
@@ -579,6 +581,7 @@ critic:
       probe_quant_error: false
       probe_quant_error_output_path: null
       probe_quant_error_use_high_precision: true
+      probe_quant_error_first_step_only: false
       fallback_layers: null
       experts:
         enable: false

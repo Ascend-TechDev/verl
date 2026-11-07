@@ -3,9 +3,6 @@
 
 """Streaming MXFP QDQ error collection for FSDP QAT experiments."""
 
-# HTML/CSS/JavaScript is embedded in a single self-contained template below.
-# ruff: noqa: E501
-
 from __future__ import annotations
 
 import contextvars
@@ -38,13 +35,13 @@ _PROBE: MXFPQuantErrorProbe | None = None
 _PROBE_LOCK = threading.Lock()
 
 
-def _output_paths(path: str | os.PathLike[str]) -> tuple[Path, Path]:
+def _output_json_path(path: str | os.PathLike[str]) -> Path:
     output = Path(path).expanduser()
     if output.suffix.lower() in {".json", ".html"}:
         base = output.with_suffix("")
     else:
         base = output / "mxfp_quant_error"
-    return base.with_suffix(".json"), base.with_suffix(".html")
+    return base.with_suffix(".json")
 
 
 def _module_label(module_name: str) -> str:
@@ -64,18 +61,25 @@ class MXFPQuantErrorProbe:
     """Keep one compact error summary per step/layer/module/target/operand."""
 
     def __init__(self, output_path: str | os.PathLike[str]):
-        self.json_path, self.html_path = _output_paths(output_path)
+        self.json_path = _output_json_path(output_path)
         self._pending: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
         self._history: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
         self._claimed: set[tuple[int, str, str, str, str]] = set()
         self._fallback_step = 0
+        self._first_step_collected = False
         self._lock = threading.Lock()
 
     @property
     def active(self) -> bool:
         return _ACTIVE_STEP.get() is not None
 
-    def begin_step(self, step: int | None) -> int:
+    def begin_step(self, step: int | None, *, first_step_only: bool = False) -> int | None:
+        if first_step_only:
+            with self._lock:
+                if self._first_step_collected:
+                    _ACTIVE_STEP.set(None)
+                    return None
+                self._first_step_collected = True
         if step is None:
             self._fallback_step += 1
             step = self._fallback_step
@@ -125,6 +129,7 @@ class MXFPQuantErrorProbe:
         quantized_flat = quantized.detach().reshape(-1)
         device = reference.device
         abs_sum = torch.zeros((), device=device, dtype=torch.float32)
+        relative_abs_sum = torch.zeros_like(abs_sum)
         sq_sum = torch.zeros_like(abs_sum)
         max_abs = torch.zeros_like(abs_sum)
         reference_sq_sum = torch.zeros_like(abs_sum)
@@ -135,7 +140,16 @@ class MXFPQuantErrorProbe:
             reference_chunk = reference_flat[start:stop].to(torch.float32)
             error_chunk = quantized_flat[start:stop].to(torch.float32) - reference_chunk
             abs_chunk = error_chunk.abs()
+            reference_abs_chunk = reference_chunk.abs()
+            nonzero_reference = reference_abs_chunk > 0
+            safe_reference_abs = torch.where(nonzero_reference, reference_abs_chunk, 1.0)
+            relative_abs_chunk = torch.where(
+                nonzero_reference,
+                abs_chunk / safe_reference_abs,
+                torch.zeros_like(abs_chunk),
+            )
             abs_sum += abs_chunk.sum()
+            relative_abs_sum += relative_abs_chunk.sum()
             sq_sum += error_chunk.square().sum()
             max_abs = torch.maximum(max_abs, abs_chunk.amax())
             reference_sq_sum += reference_chunk.square().sum()
@@ -145,6 +159,7 @@ class MXFPQuantErrorProbe:
             torch.stack(
                 (
                     abs_sum,
+                    relative_abs_sum,
                     sq_sum,
                     max_abs,
                     reference_sq_sum,
@@ -162,9 +177,10 @@ class MXFPQuantErrorProbe:
             "operand": operand,
             "_count": reference_flat.numel(),
             "_abs_sum": float(stats[0]),
-            "_sq_sum": float(stats[1]),
-            "_max_abs": float(stats[2]),
-            "_reference_sq_sum": float(stats[3]),
+            "_relative_abs_sum": float(stats[1]),
+            "_sq_sum": float(stats[2]),
+            "_max_abs": float(stats[3]),
+            "_reference_sq_sum": float(stats[4]),
             "rank_count": 1,
         }
         records = []
@@ -212,6 +228,7 @@ class MXFPQuantErrorProbe:
                     else:
                         current["_count"] += record["_count"]
                         current["_abs_sum"] += record["_abs_sum"]
+                        current["_relative_abs_sum"] += record["_relative_abs_sum"]
                         current["_sq_sum"] += record["_sq_sum"]
                         current["_max_abs"] = max(current["_max_abs"], record["_max_abs"])
                         current["_reference_sq_sum"] += record["_reference_sq_sum"]
@@ -239,6 +256,7 @@ class MXFPQuantErrorProbe:
             "operand": record["operand"],
             "count": count,
             "mae": record["_abs_sum"] / count if count else 0.0,
+            "relative_abs": record["_relative_abs_sum"] / count if count else 0.0,
             "rmse": (sq_sum / count) ** 0.5 if count else 0.0,
             "max_abs": record["_max_abs"],
             "relative_l2": (sq_sum / ref_sq_sum) ** 0.5 if ref_sq_sum else 0.0,
@@ -251,8 +269,7 @@ class MXFPQuantErrorProbe:
         records.sort(key=_record_sort_key)
         payload = {"schema_version": 1, "records": records}
         self._atomic_write(self.json_path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-        self._atomic_write(self.html_path, _build_html(records))
-        logger.info("MXFP QDQ probe wrote %d unique records to %s and %s", len(records), self.json_path, self.html_path)
+        logger.info("MXFP QDQ probe wrote %d unique records to %s", len(records), self.json_path)
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:
@@ -268,46 +285,18 @@ class MXFPQuantErrorProbe:
                 temporary.unlink()
 
 
-def _build_html(records: list[dict[str, Any]]) -> str:
-    safe_data = json.dumps(records, ensure_ascii=False).replace("</", "<\\/")
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MXFP QDQ Error Probe</title><style>
-body{{font:14px system-ui,sans-serif;margin:24px;color:#18212b;background:#f5f7fa}}h1{{margin-bottom:6px}}
-.controls{{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}}label{{display:grid;gap:4px}}select{{min-width:150px;padding:7px}}
-.summary{{display:flex;gap:12px;flex-wrap:wrap}}.card{{background:white;border:1px solid #dce2e8;border-radius:8px;padding:12px 16px}}
-canvas{{background:white;border:1px solid #dce2e8;border-radius:8px;width:100%;height:280px}}
-table{{width:100%;border-collapse:collapse;background:white;margin-top:16px}}th,td{{padding:8px;border-bottom:1px solid #e5e9ee;text-align:right}}
-th{{position:sticky;top:0;background:#eef2f6}}th:nth-child(-n+5),td:nth-child(-n+5){{text-align:left}}
-.table-wrap{{max-height:55vh;overflow:auto;background:white}}.muted{{color:#627080}}
-</style></head><body><h1>MXFP QDQ Error Probe</h1>
-<p class="muted">One observation per step, layer, module, target and operand. Values are aggregated across distributed ranks.</p>
-<div class="summary" id="summary"></div><div class="controls">
-<label>Step<select id="step"></select></label><label>Layer<select id="layer"></select></label>
-<label>Module<select id="module"></select></label><label>Target<select id="target"></select></label>
-</div><canvas id="chart" width="1400" height="280"></canvas>
-<div class="table-wrap"><table><thead><tr><th>Step</th><th>Layer</th><th>Module</th><th>Target</th><th>Operand</th><th>Count</th><th>MAE</th><th>RMSE</th><th>Max abs</th><th>Relative L2</th><th>Ranks</th></tr></thead><tbody id="rows"></tbody></table></div>
-<script>const allRecords={safe_data};
-const fields=['step','layer','module','target'];const selects=Object.fromEntries(fields.map(k=>[k,document.getElementById(k)]));
-function options(key){{const values=[...new Set(allRecords.map(r=>String(r[key])))].sort((a,b)=>Number(a)-Number(b)||a.localeCompare(b));return ['all',...values]}}
-for(const key of fields){{selects[key].innerHTML=options(key).map(v=>`<option value="${{v}}">${{v==='all'?'All':key==='layer'&&v!=='all'?'Layer '+v:v}}</option>`).join('');selects[key].onchange=render}}
-if(allRecords.length)selects.step.value=String(Math.max(...allRecords.map(r=>r.step)));
-function filtered(){{return allRecords.filter(r=>fields.every(k=>selects[k].value==='all'||String(r[k])===selects[k].value))}}
-function render(){{const rows=filtered();document.getElementById('rows').innerHTML=rows.map(r=>`<tr><td>${{r.step}}</td><td>${{r.layer_name}}</td><td>${{r.module}}</td><td>${{r.target}}</td><td>${{r.operand}}</td><td>${{r.count.toLocaleString()}}</td><td>${{r.mae.toExponential(3)}}</td><td>${{r.rmse.toExponential(3)}}</td><td>${{r.max_abs.toExponential(3)}}</td><td>${{r.relative_l2.toExponential(3)}}</td><td>${{r.rank_count}}</td></tr>`).join('');
-document.getElementById('summary').innerHTML=[['Records',rows.length],['Steps',new Set(rows.map(r=>r.step)).size],['Layers',new Set(rows.map(r=>r.layer_name)).size],['Modules',new Set(rows.map(r=>r.module)).size]].map(([k,v])=>`<div class="card"><b>${{k}}</b><br>${{v}}</div>`).join('');draw(rows)}}
-function draw(rows){{const c=document.getElementById('chart'),ctx=c.getContext('2d');ctx.clearRect(0,0,c.width,c.height);if(!rows.length)return;const vals=rows.map(r=>r.rmse),max=Math.max(...vals,1e-30),left=76,top=22,bottom=42,w=(c.width-left-20)/rows.length;ctx.fillStyle='#263746';ctx.font='13px system-ui';ctx.fillText('RMSE (log scale)',12,18);rows.forEach((r,i)=>{{const h=(Math.log10(Math.max(r.rmse,1e-30))-Math.log10(max/1000))/(3)* (c.height-top-bottom);const bar=Math.max(2,Math.min(c.height-top-bottom,h));const x=left+i*w;ctx.fillStyle=['#3478c5','#e48636','#3b9c74','#a45ca8'][i%4];ctx.fillRect(x+2,c.height-bottom-bar,Math.max(3,w-4),bar);ctx.save();ctx.translate(x+w/2,c.height-bottom+8);ctx.rotate(-Math.PI/4);ctx.textAlign='right';ctx.fillStyle='#334';ctx.fillText(`${{r.step}} · L${{r.layer}} ${{r.module}}/${{r.target}} ${{r.operand}}`,0,0);ctx.restore()}})}}render();</script></body></html>"""
-
-
 def configure_quant_error_probe(output_path: str | os.PathLike[str]) -> MXFPQuantErrorProbe:
     global _PROBE
     with _PROBE_LOCK:
-        if _PROBE is None or _PROBE.json_path != _output_paths(output_path)[0]:
+        if _PROBE is None or _PROBE.json_path != _output_json_path(output_path):
             _PROBE = MXFPQuantErrorProbe(output_path)
         return _PROBE
 
 
-def begin_quant_error_probe_step(output_path: str | os.PathLike[str], step: int | None) -> int:
-    return configure_quant_error_probe(output_path).begin_step(step)
+def begin_quant_error_probe_step(
+    output_path: str | os.PathLike[str], step: int | None, *, first_step_only: bool = False
+) -> int | None:
+    return configure_quant_error_probe(output_path).begin_step(step, first_step_only=first_step_only)
 
 
 def finish_quant_error_probe_step(step: int) -> None:
@@ -334,26 +323,41 @@ def quantize_with_probe(
     if target not in config.fake_quant_targets:
         return tensor
 
-    probe_enabled = bool(getattr(config, "probe_quant_error", False)) and _PROBE is not None and _PROBE.active
+    probe_configured = bool(getattr(config, "probe_quant_error", False)) and _PROBE is not None
+    probe_active = probe_configured and _PROBE.active
     layer_name = getattr(config, "layer_name", None) or "<unknown>"
     module_name = module_name or layer_name.rsplit(".", 1)[-1]
     module_names = probe_module_names or (module_name,)
     record_names = (
         [name for name in dict.fromkeys(module_names) if _PROBE.claim(layer_name, name, target, operand)]
-        if probe_enabled
+        if probe_active
         else []
     )
-    high_precision = probe_enabled and bool(getattr(config, "probe_quant_error_use_high_precision", True))
+    # Keep the model-visible path independent of the per-step probe state. A
+    # checkpoint recomputation may run without the ContextVar set by begin_step.
+    high_precision = probe_configured and bool(getattr(config, "probe_quant_error_use_high_precision", True))
     if high_precision and not record_names:
         return tensor
 
-    quantized = fake_quantize(
-        tensor,
-        fmt,
-        quant_backend=config.quant_backend,
-        rounding_mode=config.rounding_mode,
-        mxfp4_scale_alg=getattr(config, "mxfp4_scale_alg", "standard"),
-    )
+    if probe_configured:
+        # Probe QDQ values are observations or detached STE values, so do not
+        # add probe-only tensors to activation checkpoint's saved-tensor list.
+        with torch.no_grad():
+            quantized = fake_quantize(
+                tensor.detach(),
+                fmt,
+                quant_backend=config.quant_backend,
+                rounding_mode=config.rounding_mode,
+                mxfp4_scale_alg=getattr(config, "mxfp4_scale_alg", "standard"),
+            )
+    else:
+        quantized = fake_quantize(
+            tensor,
+            fmt,
+            quant_backend=config.quant_backend,
+            rounding_mode=config.rounding_mode,
+            mxfp4_scale_alg=getattr(config, "mxfp4_scale_alg", "standard"),
+        )
     if record_names:
         _PROBE.record_many(
             layer_name,
